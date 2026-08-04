@@ -48,16 +48,16 @@ Java 侧需要声明一个与之匹配的 `native` 类。方法名必须遵循 J
 public final class SMTCLoader {
 
     /** @return "title|artist|pos_ms|dur_ms"，或 "No media" */
-    public static native String nativeGetSmtcInfo();
+    public static native String getSmtcInfo();
 
     /**
      * @return Windows MediaPlaybackStatus：
      *         0 Closed · 1 Opened · 2 Changing · 3 Playing · 4 Paused · 5 Stopped
      */
-    public static native int nativeGetPlaybackStatus();
+    public static native int getPlaybackStatus();
 
     /** @return 所属应用的 User Model ID（可能为空） */
-    public static native String nativeGetSourceAppId();
+    public static native String getSourceAppId();
 
     static {
         System.loadLibrary("smtc_jni");

@@ -48,16 +48,16 @@ Java side — declare a matching `native` class. The method names must follow JN
 public final class SMTCLoader {
 
     /** @return "title|artist|pos_ms|dur_ms", or "No media" */
-    public static native String nativeGetSmtcInfo();
+    public static native String getSmtcInfo();
 
     /**
      * @return Windows MediaPlaybackStatus:
      *         0 Closed · 1 Opened · 2 Changing · 3 Playing · 4 Paused · 5 Stopped
      */
-    public static native int nativeGetPlaybackStatus();
+    public static native int getPlaybackStatus();
 
     /** @return owning app's User Model ID (may be empty) */
-    public static native String nativeGetSourceAppId();
+    public static native String getSourceAppId();
 
     static {
         System.loadLibrary("smtc_jni");
