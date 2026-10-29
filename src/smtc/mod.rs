@@ -39,3 +39,15 @@ pub fn get_source_app_id() -> String {
         stub::get_source_app_id()
     }
 }
+
+pub fn get_cover_bytes() -> Vec<u8> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::get_cover_bytes()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        stub::get_cover_bytes()
+    }
+}

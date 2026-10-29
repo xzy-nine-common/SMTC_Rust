@@ -9,11 +9,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jni = "0.21"
+# 封面以 base64 字符串跨 JNI 传递，避免手工管理字节数组生命周期
+base64 = "0.22"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Foundation",
     "Media_Control",
+    # 封面缩略图经 Storage.Streams 读取字节流
+    "Storage_Streams",
 ] }
 
 [profile.release]

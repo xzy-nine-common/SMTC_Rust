@@ -9,3 +9,7 @@ pub fn get_playback_status() -> i32 {
 pub fn get_source_app_id() -> String {
     String::new()
 }
+
+pub fn get_cover_bytes() -> Vec<u8> {
+    Vec::new()
+}

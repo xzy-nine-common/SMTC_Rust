@@ -35,3 +35,22 @@ pub extern "system" fn Java_wtf_magma_audio_SMTCLoader_getSourceAppId(
         Err(_) => std::ptr::null_mut(),
     }
 }
+
+/// 当前会话封面的 base64 编码（原始图片字节，通常 JPEG/PNG）；无封面时为空串。
+#[no_mangle]
+pub extern "system" fn Java_wtf_magma_audio_SMTCLoader_getCoverBase64(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    use base64::Engine as _;
+    let bytes = smtc::get_cover_bytes();
+    let encoded = if bytes.is_empty() {
+        String::new()
+    } else {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    };
+    match env.new_string(&encoded) {
+        Ok(js) => js.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}

@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use windows::{
     Foundation::TimeSpan,
     Media::Control::GlobalSystemMediaTransportControlsSessionManager,
+    Storage::Streams::{DataReader, IRandomAccessStreamWithContentType},
 };
 
 static MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
@@ -65,4 +66,33 @@ fn query() -> Option<String> {
 
 fn ts_to_ms(ts: TimeSpan) -> i64 {
     ts.Duration / 10_000
+}
+
+/// 当前会话封面的原始字节（通常为 JPEG 或 PNG）。
+///
+/// 直接返回缩略图流的原始字节，不做解码或转码：调用方按图片字节解析，
+/// 与 SMTC 侧提供的编码保持一致。
+pub fn get_cover_bytes() -> Vec<u8> {
+    read_thumbnail_bytes().unwrap_or_default()
+}
+
+fn read_thumbnail_bytes() -> Option<Vec<u8>> {
+    let props = manager()?
+        .GetCurrentSession()
+        .ok()?
+        .TryGetMediaPropertiesAsync()
+        .ok()?
+        .get()
+        .ok()?;
+    let thumbnail = props.Thumbnail().ok()?;
+    let stream: IRandomAccessStreamWithContentType = thumbnail.OpenReadAsync().ok()?.get().ok()?;
+    let size = stream.Size().ok()?;
+    if size == 0 {
+        return None;
+    }
+    let reader = DataReader::CreateDataReader(&stream).ok()?;
+    reader.LoadAsync(size as u32).ok()?.get().ok()?;
+    let mut buffer = vec![0u8; size as usize];
+    reader.ReadBytes(&mut buffer).ok()?;
+    Some(buffer)
 }
