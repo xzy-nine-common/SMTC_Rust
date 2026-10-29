@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 jni = "0.21"
 # 封面以 base64 字符串跨 JNI 传递，避免手工管理字节数组生命周期
 base64 = "0.22"
+# 日志门面：统一经本库 logger 过滤，抑制依赖库输出
+log = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -19,6 +21,9 @@ windows = { version = "0.58", features = [
     # 封面缩略图经 Storage.Streams 读取字节流
     "Storage_Streams",
 ] }
+# 系统声音采集：cpal 在 Windows 上对渲染设备打开输入流即自动置
+# AUDCLNT_STREAMFLAGS_LOOPBACK，等价于 WASAPI 回环采集。
+cpal = "0.18"
 
 [profile.release]
 opt-level = 3
