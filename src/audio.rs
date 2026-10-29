@@ -2,10 +2,25 @@
 //!
 //! Windows 上对「渲染（输出）」设备打开输入流时，cpal 会置
 //! `AUDCLNT_STREAMFLAGS_LOOPBACK`，因此无需手写 COM 即可采集系统正在播放的声音。
-//! 采集到的样本统一转为 16 位小端交错 PCM，经回调交给宿主（Kotlin）推流。
+//!
+//! **实时线程约束**：采集回调运行在系统音频线程上，必须在毫秒级返回。
+//! 因此回调内只做「格式转换 + 入环形缓冲」——不分配堆内存、不取阻塞锁、不调 JNI；
+//! 实际交付（JNI → 宿主 → Opus 编码 → 发包）由独立交付线程完成。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
+
+/// 环形缓冲容量（样本数）：48000Hz 立体声约 2 秒，用于吸收交付线程的调度抖动。
+const RING_CAPACITY: usize = 192_000;
+
+/// 单次交付的样本上限，避免一次 JNI 调用携带过多数据而拉高延迟。
+const DELIVERY_CHUNK: usize = 4_800;
+
+/// 交付线程空转时的休眠间隔。
+const DELIVERY_IDLE_MS: u64 = 2;
 
 #[cfg(target_os = "windows")]
 mod imp {
@@ -23,12 +38,13 @@ mod imp {
         pub channels: i32,
     }
 
-    /// 句柄不可跨线程直接持有 `Stream` 之外的类型限制由上层 Mutex 承担。
+    /// 句柄由上层 Mutex 保护，可跨线程持有。
     unsafe impl Send for Capture {}
 
     /// 在默认输出设备上打开回环采集流。
     ///
-    /// `on_data` 收到的缓冲区是 16 位小端交错 PCM。
+    /// `on_data` 在**音频实时线程**被调用，参数为 16 位交错 PCM；
+    /// 实现必须快速返回（不得分配、阻塞或做重活）。
     pub fn open<F>(on_data: F) -> Option<Capture>
     where
         F: FnMut(&[i16]) + Send + 'static,
@@ -45,21 +61,27 @@ mod imp {
 
         let mut callback = on_data;
         let stream = match sample_format {
-            SampleFormat::F32 => device
-                .build_input_stream(
-                    config.clone(),
-                    move |data: &[f32], _| {
-                        let mut pcm = Vec::with_capacity(data.len());
-                        for s in data {
-                            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                            pcm.push(v);
-                        }
-                        callback(&pcm);
-                    },
-                    |err| on_stream_error(&err),
-                    None,
-                )
-                .ok()?,
+            SampleFormat::F32 => {
+                // 转换缓冲在闭包外预分配并复用，避免每次回调重新分配
+                let mut scratch: Vec<i16> = Vec::new();
+                device
+                    .build_input_stream(
+                        config.clone(),
+                        move |data: &[f32], _| {
+                            scratch.clear();
+                            if scratch.capacity() < data.len() {
+                                scratch.reserve(data.len() - scratch.capacity());
+                            }
+                            for s in data {
+                                scratch.push((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                            }
+                            callback(&scratch);
+                        },
+                        |err| on_stream_error(&err),
+                        None,
+                    )
+                    .ok()?
+            }
             SampleFormat::I16 => device
                 .build_input_stream(
                     config.clone(),
@@ -68,20 +90,26 @@ mod imp {
                     None,
                 )
                 .ok()?,
-            SampleFormat::U16 => device
-                .build_input_stream(
-                    config.clone(),
-                    move |data: &[u16], _| {
-                        let mut pcm = Vec::with_capacity(data.len());
-                        for s in data {
-                            pcm.push((*s as i32 - 32768) as i16);
-                        }
-                        callback(&pcm);
-                    },
-                    |err| on_stream_error(&err),
-                    None,
-                )
-                .ok()?,
+            SampleFormat::U16 => {
+                let mut scratch: Vec<i16> = Vec::new();
+                device
+                    .build_input_stream(
+                        config.clone(),
+                        move |data: &[u16], _| {
+                            scratch.clear();
+                            if scratch.capacity() < data.len() {
+                                scratch.reserve(data.len() - scratch.capacity());
+                            }
+                            for s in data {
+                                scratch.push((*s as i32 - 32768) as i16);
+                            }
+                            callback(&scratch);
+                        },
+                        |err| on_stream_error(&err),
+                        None,
+                    )
+                    .ok()?
+            }
             other => {
                 log::warn!("不支持的采样格式: {other:?}");
                 return None;
@@ -139,6 +167,9 @@ static CAPTURE: OnceLock<Mutex<Option<imp::Capture>>> = OnceLock::new();
 /// 采集是否运行中。
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// 因缓冲写满或取锁失败而丢弃的样本数（供诊断）。
+static DROPPED_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
 fn slot() -> &'static Mutex<Option<imp::Capture>> {
     CAPTURE.get_or_init(|| Mutex::new(None))
 }
@@ -146,7 +177,8 @@ fn slot() -> &'static Mutex<Option<imp::Capture>> {
 ///
 /// 启动系统声音采集。
 ///
-/// `on_data` 在采集线程被调用，参数为 16 位小端交错 PCM。
+/// `on_data` 在**独立交付线程**被调用（非音频实时线程），参数为 16 位小端交错 PCM，
+/// 因此可以安全地做 JNI 调用与编码等耗时工作。
 /// 返回 0 表示成功，负值表示失败；已在运行时返回 0（幂等）。
 pub fn start<F>(on_data: F) -> i32
 where
@@ -155,17 +187,68 @@ where
     if RUNNING.load(Ordering::SeqCst) {
         return 0;
     }
-    let capture = match imp::open(on_data) {
+
+    let ring: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
+
+    // 实时回调：只做转换与入环，绝不阻塞或分配
+    let ring_cb = Arc::clone(&ring);
+    let capture = match imp::open(move |pcm: &[i16]| {
+        match ring_cb.try_lock() {
+            Ok(mut queue) => {
+                if queue.len() + pcm.len() <= RING_CAPACITY {
+                    queue.extend(pcm.iter().copied());
+                } else {
+                    // 交付线程落后：丢弃本块而非扩容阻塞实时线程
+                    DROPPED_SAMPLES.fetch_add(pcm.len() as u64, Ordering::Relaxed);
+                }
+            }
+            Err(_) => {
+                DROPPED_SAMPLES.fetch_add(pcm.len() as u64, Ordering::Relaxed);
+            }
+        }
+    }) {
         Some(c) => c,
         None => {
             log::warn!("打开系统声音采集失败");
             return -1;
         }
     };
+
     if let Ok(mut guard) = slot().lock() {
         *guard = Some(capture);
     }
     RUNNING.store(true, Ordering::SeqCst);
+
+    // 交付线程：与实时线程解耦，承担 JNI 与编码开销
+    let ring_dl = Arc::clone(&ring);
+    thread::Builder::new()
+        .name("audio-delivery".to_string())
+        .spawn(move || {
+            let mut staging: Vec<i16> = Vec::with_capacity(DELIVERY_CHUNK);
+            let mut mut_cb = on_data;
+            let mut last_report = std::time::Instant::now();
+            while RUNNING.load(Ordering::SeqCst) {
+                staging.clear();
+                if let Ok(mut queue) = ring_dl.lock() {
+                    let take = queue.len().min(DELIVERY_CHUNK);
+                    staging.extend(queue.drain(..take));
+                }
+                if staging.is_empty() {
+                    thread::sleep(Duration::from_millis(DELIVERY_IDLE_MS));
+                    continue;
+                }
+                mut_cb(&staging);
+
+                // 周期性上报丢弃量，便于判断缓冲是否长期不足
+                let dropped = DROPPED_SAMPLES.swap(0, Ordering::Relaxed);
+                if dropped > 0 && last_report.elapsed() >= Duration::from_secs(5) {
+                    log::warn!("音频采集丢弃 {dropped} 个样本（交付线程落后）");
+                    last_report = std::time::Instant::now();
+                }
+            }
+        })
+        .ok();
+
     0
 }
 
