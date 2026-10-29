@@ -2,4 +2,5 @@
 mod audio;
 mod jni;
 mod logging;
+mod notifications;
 mod smtc;

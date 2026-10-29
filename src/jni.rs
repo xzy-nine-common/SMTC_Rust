@@ -126,3 +126,24 @@ pub extern "system" fn Java_wtf_magma_audio_SMTCLoader_audioCaptureFormat(
     let _ = env.set_int_array_region(&arr, 0, &[rate, channels]);
     arr.into_raw()
 }
+
+/// 读取当前全部本机通知，编码为 `id\u{1}appName\u{1}appPackage\u{1}title\u{1}text`，
+/// 多条以 `\u{2}` 分隔；失败时返回以 `!` 开头的错误说明。
+#[no_mangle]
+pub extern "system" fn Java_wtf_magma_audio_SMTCLoader_listNotifications(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    crate::logging::init();
+    let encoded = match crate::notifications::list_encoded() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("读取本机通知失败: {e}");
+            format!("!{e}")
+        }
+    };
+    match env.new_string(&encoded) {
+        Ok(js) => js.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}

@@ -20,6 +20,12 @@ windows = { version = "0.58", features = [
     "Media_Control",
     # 封面缩略图经 Storage.Streams 读取字节流
     "Storage_Streams",
+    # 本机通知采集；GetNotificationsAsync 返回 IVectorView，需 Collections 特性
+    "UI_Notifications",
+    "UI_Notifications_Management",
+    "Foundation_Collections",
+    # 通知的 AppInfo（AppUserModelId / DisplayInfo）位于 ApplicationModel
+    "ApplicationModel",
 ] }
 # 系统声音采集：cpal 在 Windows 上对渲染设备打开输入流即自动置
 # AUDCLNT_STREAMFLAGS_LOOPBACK，等价于 WASAPI 回环采集。
