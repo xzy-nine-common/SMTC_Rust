@@ -18,6 +18,8 @@ pub struct Notification {
     pub app_package: String,
     pub title: String,
     pub text: String,
+    /// 应用图标原始字节（PNG/JPEG）；取不到时为空。
+    pub icon: Vec<u8>,
 }
 
 #[cfg(target_os = "windows")]
@@ -27,6 +29,9 @@ mod imp {
         UserNotificationListener, UserNotificationListenerAccessStatus,
     };
     use windows::UI::Notifications::NotificationKinds;
+
+    /// 图标请求边长：与 Windows 侧通知图标尺寸一致。
+    const ICON_SIZE: f32 = 48.0;
 
     /// 获取监听器；未授权时返回错误说明。
     fn listener() -> Result<UserNotificationListener, String> {
@@ -41,6 +46,27 @@ mod imp {
             return Err(format!("未授权: {status:?}"));
         }
         Ok(listener)
+    }
+
+    /// 读取随机访问流的全部字节（图标等小体积资源）。
+    fn read_stream_bytes(
+        reference: windows::Storage::Streams::RandomAccessStreamReference,
+    ) -> Option<Vec<u8>> {
+        use windows::Storage::Streams::DataReader;
+        let stream = reference.OpenReadAsync().ok()?.get().ok()?;
+        let size = stream.Size().ok()?;
+        if size == 0 {
+            return None;
+        }
+        let reader = DataReader::CreateDataReader(&stream).ok()?;
+        reader.LoadAsync(size as u32).ok()?.get().ok()?;
+        let len = reader.UnconsumedBufferLength().ok()? as usize;
+        if len == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; len];
+        reader.ReadBytes(&mut buffer).ok()?;
+        Some(buffer)
     }
 
     /// 读取当前全部 Toast 通知。
@@ -74,13 +100,25 @@ mod imp {
             } else {
                 String::new()
             };
-            let app_name = app_info
-                .DisplayInfo()
-                .ok()
+            let display_info = app_info.DisplayInfo().ok();
+            let app_name = display_info
+                .as_ref()
                 .and_then(|d| d.DisplayName().ok())
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| app_package.clone());
+            // 应用图标：DisplayInfo.GetLogo 返回 IRandomAccessStreamReference，读出原始字节
+            let icon = display_info
+                .as_ref()
+                .and_then(|d| {
+                    d.GetLogo(windows::Foundation::Size {
+                        Width: ICON_SIZE,
+                        Height: ICON_SIZE,
+                    })
+                    .ok()
+                })
+                .and_then(|reference| read_stream_bytes(reference))
+                .unwrap_or_default();
 
             // 标题取绑定的第一个文本，其余文本按行拼接为内容
             let mut title = String::new();
@@ -122,6 +160,7 @@ mod imp {
                 app_package,
                 title,
                 text,
+                icon,
             });
         }
         Ok(out)
@@ -135,23 +174,25 @@ mod imp {
     pub fn list() -> Result<Vec<Notification>, String> {
         Err("非 Windows 平台不支持本机通知采集".to_string())
     }
+
 }
 
 ///
 /// 读取当前全部本机通知。
 ///
-/// 每条形如 `id\u{1}appName\u{1}appPackage\u{1}title\u{1}text`，多条以 `\u{2}` 分隔；
-/// 字段内含分隔符时以空格替代，保证可解析。
+/// 每条形如 `id\u{1}appName\u{1}appPackage\u{1}title\u{1}text\u{1}iconBase64`，多条以 `\u{2}` 分隔；
+/// 字段内含分隔符时以空格替代，保证可解析；无图标时最后一个字段为空串。
 pub fn list_encoded() -> Result<String, String> {
     const FIELD_SEP: char = '\u{1}';
     const RECORD_SEP: char = '\u{2}';
     let items = imp::list()?;
+    use base64::Engine as _;
     let sanitize = |s: &str| s.replace(FIELD_SEP, " ").replace(RECORD_SEP, " ");
     let encoded = items
         .iter()
         .map(|n| {
             format!(
-                "{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 sanitize(&n.id),
                 FIELD_SEP,
                 sanitize(&n.app_name),
@@ -160,7 +201,13 @@ pub fn list_encoded() -> Result<String, String> {
                 FIELD_SEP,
                 sanitize(&n.title),
                 FIELD_SEP,
-                sanitize(&n.text)
+                sanitize(&n.text),
+                FIELD_SEP,
+                if n.icon.is_empty() {
+                    String::new()
+                } else {
+                    base64::engine::general_purpose::STANDARD.encode(&n.icon)
+                }
             )
         })
         .collect::<Vec<_>>()
